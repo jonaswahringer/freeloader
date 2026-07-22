@@ -30,7 +30,10 @@ struct ContentView: View {
                             }
                         }
                         .onDelete { offsets in
-                            for i in offsets { context.delete(books[i]) }
+                            for i in offsets {
+                                if let wikiID = books[i].wikiID { BookWiki.remove(wikiID: wikiID) }
+                                context.delete(books[i])
+                            }
                         }
                     }
                 }
@@ -63,6 +66,11 @@ struct ContentView: View {
                 guard case .success(let url) = result else { return }
                 importBook(at: url)
             }
+            .task(id: books.count) {
+                // Retroactive pass: build wikis for books imported before this
+                // feature existed (or left incomplete by a quit mid-generation).
+                WikiGenerator.shared.scan(books: books)
+            }
             .alert("Import Failed", isPresented: .init(
                 get: { importError != nil },
                 set: { if !$0 { importError = nil } }
@@ -79,7 +87,8 @@ struct ContentView: View {
         Task {
             defer { isImporting = false }
             do {
-                _ = try await PDFImporter.importPDF(at: url, into: context)
+                let book = try await PDFImporter.importPDF(at: url, into: context)
+                WikiGenerator.shared.ensureWiki(for: book)
             } catch {
                 importError = error.localizedDescription
             }
@@ -89,16 +98,58 @@ struct ContentView: View {
 
 private struct BookRow: View {
     let book: Book
+    @Environment(\.colorScheme) private var scheme
+
+    private var wikiProgress: WikiProgress? {
+        WikiGenerator.shared.progress(for: book)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(book.title)
-                .font(.headline)
-            Text(subtitle)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(book.title)
+                    .font(.headline)
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            wikiIndicator
         }
         .padding(.vertical, 2)
+    }
+
+    // Unobtrusive wiki-generation status: a small amber ring that fills as
+    // chapters finish, then simply disappears. Failures whisper, not shout.
+    @ViewBuilder
+    private var wikiIndicator: some View {
+        if let progress = wikiProgress {
+            switch progress.phase {
+            case .generating:
+                ZStack {
+                    Circle()
+                        .stroke(.quaternary, lineWidth: 2)
+                    Circle()
+                        .trim(from: 0, to: max(progress.fraction, 0.04))
+                        .stroke(
+                            ReadingPalette.brand(scheme),
+                            style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 14, height: 14)
+                .animation(.smooth(duration: 0.4), value: progress.completed)
+                .help("Preparing book notes — \(progress.completed) of \(progress.total) chapters")
+                .accessibilityLabel("Preparing book notes, \(progress.completed) of \(progress.total) chapters")
+            case .failed(let reason):
+                Image(systemName: "exclamationmark.circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .help("Book notes incomplete: \(reason)")
+            case .unavailable, .done:
+                EmptyView() // quiet — reading works fine without notes
+            }
+        }
     }
 
     private var subtitle: String {

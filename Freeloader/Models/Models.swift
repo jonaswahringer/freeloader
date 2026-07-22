@@ -10,6 +10,9 @@ final class Book {
     var author: String?
     var addedAt: Date
     var sourceFileName: String?
+    /// Stable key for the book's on-disk wiki directory (assigned lazily so
+    /// books imported before this field existed migrate cleanly).
+    var wikiID: UUID?
     @Relationship(deleteRule: .cascade, inverse: \Chapter.book)
     var chapters: [Chapter] = []
     @Relationship(deleteRule: .cascade, inverse: \ReadingPosition.book)
