@@ -1,0 +1,72 @@
+{
+  "source": "/Users/jonasw/localdocs/freeloader/Freeloader/ContentView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "Freeloader",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 38
+        }
+      },
+      {
+        "comment": "",
+        "key": "Import Failed",
+        "location": {
+          "startingColumn": 20,
+          "startingLine": 66
+        }
+      },
+      {
+        "comment": "",
+        "key": "No Books Yet",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 18
+        }
+      },
+      {
+        "comment": "",
+        "key": "Import a PDF to start reading.",
+        "location": {
+          "startingColumn": 30,
+          "startingLine": 20
+        }
+      },
+      {
+        "comment": "",
+        "key": "Import PDF…",
+        "location": {
+          "startingColumn": 32,
+          "startingLine": 22
+        }
+      },
+      {
+        "comment": "",
+        "key": "Import PDF",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 47
+        }
+      },
+      {
+        "comment": "",
+        "key": "Importing…",
+        "location": {
+          "startingColumn": 34,
+          "startingLine": 54
+        }
+      },
+      {
+        "comment": "",
+        "key": "OK",
+        "location": {
+          "startingColumn": 24,
+          "startingLine": 70
+        }
+      }
+    ]
+  },
+  "version": 1
+}

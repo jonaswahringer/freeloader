@@ -1,0 +1,56 @@
+{
+  "source": "/Users/jonasw/localdocs/freeloader/Freeloader/Reading/ReadingView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "Chapters",
+        "location": {
+          "startingColumn": 23,
+          "startingLine": 256
+        }
+      },
+      {
+        "comment": "",
+        "key": "Next Chapter",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 266
+        }
+      },
+      {
+        "comment": "",
+        "key": "Aa",
+        "location": {
+          "startingColumn": 18,
+          "startingLine": 319
+        }
+      },
+      {
+        "comment": "",
+        "key": "Text Size",
+        "location": {
+          "startingColumn": 22,
+          "startingLine": 330
+        }
+      },
+      {
+        "comment": "",
+        "key": "Aa",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 334
+        }
+      },
+      {
+        "comment": "",
+        "key": "Aa",
+        "location": {
+          "startingColumn": 26,
+          "startingLine": 337
+        }
+      }
+    ]
+  },
+  "version": 1
+}
