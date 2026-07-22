@@ -60,20 +60,26 @@ enum Bionic {
         return BuiltParagraph(text: result, wordRanges: wordRanges)
     }
 
-    private static func bionicWord(
-        _ word: String, size: CGFloat, ink: Color, faded: Color
-    ) -> AttributedString {
+    /// Index just past the bold prefix of `word` (shared by the renderer and
+    /// the pagination measurer so widths always match what is drawn).
+    static func boldPrefixEnd(of word: String) -> String.Index {
         let letters = word.unicodeScalars.filter {
             CharacterSet.alphanumerics.contains($0)
         }.count
         let k = prefixCount(letters: letters)
-
         var boldEnd = word.startIndex
         var seen = 0
         for idx in word.indices {
             if word[idx].isLetter || word[idx].isNumber { seen += 1 }
             if seen == k { boldEnd = word.index(after: idx); break }
         }
+        return boldEnd
+    }
+
+    private static func bionicWord(
+        _ word: String, size: CGFloat, ink: Color, faded: Color
+    ) -> AttributedString {
+        let boldEnd = boldPrefixEnd(of: word)
 
         var head = AttributedString(String(word[word.startIndex..<boldEnd]))
         head.font = .system(size: size, weight: .bold, design: .serif)

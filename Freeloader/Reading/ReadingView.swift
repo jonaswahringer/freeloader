@@ -1,16 +1,26 @@
 import SwiftUI
+import SwiftData
 
 // 0.5s: a warm paper page — one serene serif column with rhythmic bold
 // word-starts, floating on parchment; a single amber word marks the reader.
 // User: an easily-pulled-away reader settling in for a focused session.
 // Emotional intent: CALM / FOCUSED — zero chrome, the screen IS the page.
 //
-// Performance model (ticket 12): bionic AttributedStrings are built off the
-// main thread by ChapterBuilder (actor, LRU cache keyed by chapter/size/
-// scheme) with neighbor-chapter prefetch, so chapter switches are cache hits.
-// The column is a LazyVStack, and the old whole-column `.animation(value:
-// fontSize)` is gone — resizes swap in a prebuilt column instead of
-// animating a full re-layout.
+// Ticket 05: the chapter is paginated into fixed pages sized to the window.
+// An amber cursor sweeps word-by-word at the reader's WPM (length- and
+// punctuation-weighted), magnifying the current word Dock-style — neighbors
+// swell with a cosine falloff, purely visual scale, never a reflow. Pages
+// turn themselves when the cursor crosses the fold; the reader can pause,
+// flip pages, or click any word to move the cursor. Pacing guides, never
+// forces.
+//
+// Performance model (ticket 12 + 05): bionic AttributedStrings are built
+// off-main by ChapterBuilder (LRU cache + neighbor prefetch); Paginator
+// (also an actor, off-main, CoreText measurement) turns a BuiltChapter into
+// absolutely-positioned word frames. The playback loop is a single async
+// task sleeping per-word intervals — one small withAnimation per tick, and
+// Equatable word glyphs mean only the few words whose scale changed
+// re-render.
 
 // MARK: - Palette (seed 38°, analogous, WCAG-validated)
 
@@ -73,15 +83,25 @@ enum SampleChapter {
 
 struct ReadingView: View {
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.modelContext) private var modelContext
+
     @State private var fontSize: CGFloat = 25
     @State private var showTypeControls = false
+    @State private var showPaceControls = false
     @State private var chapterIndex: Int = 0
     @State private var built: BuiltChapter?
+    @State private var paginated: PaginatedChapter?
+    @State private var pageIndex: Int = 0
+    /// Global word index of the amber cursor within the current chapter.
+    @State private var cursor: Int = 0
+    @State private var isPlaying = false
+    @State private var wpm: Double = 250
+    /// +1 forward, -1 backward — decides which way pages drift.
+    @State private var turnDirection: Int = 1
+    @State private var pageArea: CGSize = .zero
 
     var book: Book?
-
-    private var lineSpacing: CGFloat { fontSize * 0.58 }
-    private var columnWidth: CGFloat { min(fontSize * 34, 720) }
 
     private var sortedChapters: [Chapter] {
         (book?.chapters ?? []).sorted { $0.index < $1.index }
@@ -129,95 +149,128 @@ struct ReadingView: View {
         )
     }
 
-    /// Only show built text that belongs to the current chapter — never
-    /// stale paragraphs under a new header. (Stale *sizes* of the same
-    /// chapter are fine: they keep text on screen during a resize.)
-    private var displayed: BuiltChapter? {
-        guard let built, built.sourceID == currentMeta.id else { return nil }
-        return built
+    private var layoutSpec: PageLayoutSpec? {
+        guard pageArea.width > 60, pageArea.height > 120 else { return nil }
+        return PageLayoutSpec(
+            fontSize: fontSize,
+            columnWidth: min(fontSize * 34, 720, pageArea.width),
+            pageHeight: pageArea.height,
+            dark: scheme == .dark
+        )
     }
 
-    private struct BuildRequest: Equatable {
+    /// Only show pages that belong to the current chapter — never stale
+    /// paragraphs under a new header. (A stale *layout* of the same chapter
+    /// stays visible during a resize until the new one lands.)
+    private var displayedPagination: PaginatedChapter? {
+        guard let paginated, paginated.chapterID == currentMeta.id else { return nil }
+        return paginated
+    }
+
+    private struct PipelineRequest: Equatable {
         let chapterID: String
         let size: CGFloat
         let dark: Bool
+        let columnWidth: CGFloat
+        let pageHeight: CGFloat
     }
 
-    private var buildRequest: BuildRequest {
-        BuildRequest(chapterID: currentMeta.id, size: fontSize, dark: scheme == .dark)
+    private var pipelineRequest: PipelineRequest? {
+        guard let spec = layoutSpec else { return nil }
+        return PipelineRequest(
+            chapterID: currentMeta.id,
+            size: fontSize,
+            dark: spec.dark,
+            columnWidth: spec.columnWidth.rounded(),
+            pageHeight: spec.pageHeight.rounded()
+        )
     }
 
     var body: some View {
         ZStack {
             backdrop
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: lineSpacing * 1.6) {
-                    header
-                        .padding(.bottom, lineSpacing)
-
-                    if let displayed {
-                        ForEach(Array(displayed.sections.enumerated()), id: \.offset) { _, section in
-                            if let title = section.title {
-                                Text(title)
-                                    .font(.system(size: fontSize * 1.25, weight: .semibold, design: .serif))
-                                    .foregroundStyle(ReadingPalette.ink(scheme))
-                                    .padding(.top, lineSpacing)
-                            }
-                            ForEach(section.paragraphs) { para in
-                                Text(para.text)
-                                    .lineSpacing(lineSpacing)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .textSelection(.enabled)
-                            }
-                        }
-
-                        sectionEndMark
-                            .padding(.top, lineSpacing)
-
-                        if book != nil, chapterIndex + 1 < sortedChapters.count {
-                            nextChapterButton
-                        }
+            VStack(spacing: 10) {
+                pageContainer
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onGeometryChange(for: CGSize.self) { proxy in
+                        proxy.size
+                    } action: { size in
+                        pageArea = size
                     }
-                }
-                .frame(maxWidth: columnWidth, alignment: .leading)
-                .padding(.horizontal, 48)
-                .padding(.top, 64)
-                .padding(.bottom, 120)
-                .frame(maxWidth: .infinity)
+
+                bottomBar
             }
-            .id(chapterIndex)   // reset scroll offset on chapter change
+            .padding(.horizontal, 48)
+            .padding(.top, 40)
+            .padding(.bottom, 16)
         }
         .overlay(alignment: .bottomTrailing) { typeButton }
         .preferredColorScheme(.dark)
         .toolbar { if book != nil { chapterMenu } }
-        .onAppear {
-            if let position = book?.readingPosition {
-                chapterIndex = position.chapterIndex
-            }
+        .onAppear(perform: restore)
+        .onDisappear {
+            isPlaying = false
+            persistPosition()
         }
         .onChange(of: chapterIndex) {
-            book?.readingPosition?.chapterIndex = chapterIndex
-            book?.readingPosition?.updatedAt = .now
+            isPlaying = false
+            cursor = 0
+            pageIndex = 0
+            persistPosition()
         }
-        .task(id: buildRequest) {
-            let request = buildRequest
-            // Full text snapshot happens only here, once per build request.
-            guard let src = source(at: chapterIndex) ?? (book == nil ? SampleChapter.source : nil) else {
-                built = nil
-                return
-            }
-            let result = await ChapterBuilder.shared.built(
-                for: src, size: request.size, scheme: scheme
-            )
-            guard !Task.isCancelled else { return }
-            if displayed == nil {
-                // First paint of this chapter: quick fade beats a pop-in.
-                withAnimation(.easeOut(duration: 0.15)) { built = result }
+        .onChange(of: wpm) {
+            book?.readingPosition?.wordsPerMinute = Int(wpm)
+        }
+        .task(id: pipelineRequest) { await runPipeline() }
+        .task(id: isPlaying) { await playbackLoop() }
+    }
+
+    // MARK: Pipeline: build (cached) → paginate (cached) → present
+
+    private func runPipeline() async {
+        guard let request = pipelineRequest, let spec = layoutSpec else { return }
+        guard let src = source(at: chapterIndex) else {
+            built = nil
+            paginated = nil
+            return
+        }
+        let chapterScheme: ColorScheme = request.dark ? .dark : .light
+        let result = await ChapterBuilder.shared.built(
+            for: src, size: request.size, scheme: chapterScheme
+        )
+        guard !Task.isCancelled else { return }
+        built = result
+        prefetchNeighbors(of: chapterIndex, size: request.size)
+
+        let pages = await Paginator.shared.paginate(result, spec: spec)
+        guard !Task.isCancelled else { return }
+        present(pages)
+    }
+
+    private func present(_ pages: PaginatedChapter) {
+        let sameChapter = paginated?.chapterID == pages.chapterID
+        var target = cursor
+        if !sameChapter {
+            // Fresh chapter: restore the persisted word if it lives here.
+            if let pos = book?.readingPosition, pos.chapterIndex == chapterIndex {
+                target = pos.wordIndex
             } else {
-                built = result
+                target = 0
             }
-            prefetchNeighbors(of: chapterIndex, size: request.size)
+        }
+        target = max(0, min(target, pages.wordCount - 1))
+        if sameChapter {
+            // Re-layout (resize / font change): keep place, no animation.
+            paginated = pages
+            cursor = max(target, 0)
+            pageIndex = pages.pageIndex(ofWord: cursor)
+        } else {
+            withAnimation(.easeOut(duration: 0.15)) {
+                paginated = pages
+                cursor = max(target, 0)
+                pageIndex = pages.pageIndex(ofWord: cursor)
+            }
         }
     }
 
@@ -231,6 +284,299 @@ struct ReadingView: View {
                 await ChapterBuilder.shared.prefetch(src, size: size, scheme: currentScheme)
             }
         }
+    }
+
+    // MARK: Playback (one async loop; variable per-word intervals)
+
+    private func playbackLoop() async {
+        guard isPlaying else { return }
+        while !Task.isCancelled, isPlaying {
+            guard let pag = displayedPagination, pag.wordCount > 0,
+                  cursor < pag.wordCount else {
+                isPlaying = false
+                return
+            }
+            let word = pag.words[cursor]
+            let interval = PacingTunables.interval(weight: word.pacingWeight, wpm: wpm)
+            try? await Task.sleep(for: .seconds(interval))
+            guard !Task.isCancelled, isPlaying else { return }
+            advance()
+        }
+    }
+
+    private func advance() {
+        guard let pag = displayedPagination else { return }
+        let next = cursor + 1
+        guard next < pag.wordCount else {
+            // Chapter finished: rest on the last word; the reader decides.
+            isPlaying = false
+            persistPosition()
+            return
+        }
+        let nextPage = pag.pageIndex(ofWord: next)
+        if nextPage != pageIndex {
+            turnDirection = nextPage > pageIndex ? 1 : -1
+            withAnimation(reduceMotion ? .default : ReadingMotion.pageTurn) {
+                pageIndex = nextPage
+                cursor = next
+            }
+            persistPosition()
+        } else {
+            withAnimation(reduceMotion ? nil : ReadingMotion.cursor) {
+                cursor = next
+            }
+            if next % 25 == 0 { persistPosition() }
+        }
+    }
+
+    private func togglePlay() {
+        // Restart a finished chapter from the top.
+        if !isPlaying, let pag = displayedPagination,
+           cursor >= pag.wordCount - 1, pag.wordCount > 1 {
+            turnDirection = -1
+            withAnimation(reduceMotion ? .default : ReadingMotion.pageTurn) {
+                cursor = 0
+                pageIndex = pag.pageIndex(ofWord: 0)
+            }
+        }
+        isPlaying.toggle()
+        if !isPlaying { persistPosition() }
+    }
+
+    private func turnPage(_ delta: Int) {
+        guard let pag = displayedPagination else { return }
+        let target = max(0, min(pageIndex + delta, pag.pages.count - 1))
+        guard target != pageIndex else { return }
+        turnDirection = delta > 0 ? 1 : -1
+        withAnimation(reduceMotion ? .default : ReadingMotion.pageTurn) {
+            pageIndex = target
+            let range = pag.pages[target].wordRange
+            if !range.isEmpty { cursor = range.lowerBound }
+        }
+        persistPosition()
+    }
+
+    private func jump(toWord id: Int) {
+        withAnimation(reduceMotion ? nil : ReadingMotion.cursor) {
+            cursor = id
+        }
+        persistPosition()
+    }
+
+    // MARK: Persistence (SwiftData ReadingPosition)
+
+    private func restore() {
+        guard let book else { return }
+        if let pos = book.readingPosition {
+            chapterIndex = pos.chapterIndex
+            cursor = pos.wordIndex
+            wpm = Double(pos.wordsPerMinute).clamped(to: PacingTunables.range)
+        }
+    }
+
+    private func persistPosition() {
+        guard let book else { return }
+        let pos: ReadingPosition
+        if let existing = book.readingPosition {
+            pos = existing
+        } else {
+            pos = ReadingPosition()
+            modelContext.insert(pos)
+            book.readingPosition = pos
+        }
+        pos.chapterIndex = chapterIndex
+        pos.wordIndex = cursor
+        if let pag = displayedPagination, pag.words.indices.contains(cursor) {
+            pos.sectionIndex = pag.words[cursor].sectionIndex
+        }
+        pos.wordsPerMinute = Int(wpm)
+        pos.updatedAt = .now
+    }
+
+    // MARK: Page container
+
+    private var pageTransition: AnyTransition {
+        if reduceMotion { return .opacity }
+        let drift = CGFloat(turnDirection) * 44
+        return .asymmetric(
+            insertion: .offset(x: drift).combined(with: .opacity),
+            removal: .offset(x: -drift).combined(with: .opacity)
+        )
+    }
+
+    @ViewBuilder
+    private var pageContainer: some View {
+        ZStack(alignment: .top) {
+            if let pag = displayedPagination, pag.pages.indices.contains(pageIndex) {
+                PageView(
+                    page: pag.pages[pageIndex],
+                    paginated: pag,
+                    spec: pag.spec,
+                    scheme: scheme,
+                    cursor: cursor,
+                    magnify: !reduceMotion,
+                    onTapWord: { jump(toWord: $0) }
+                )
+                .id("\(pag.chapterID)#\(pageIndex)")
+                .transition(pageTransition)
+            } else {
+                // Cold chapter jump: header appears instantly, text fades in
+                // when the (usually prefetched) build + layout lands.
+                interimHeader
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .clipped()
+        .gesture(
+            DragGesture(minimumDistance: 30).onEnded { value in
+                let dx = value.translation.width
+                guard abs(dx) > 60, abs(dx) > abs(value.translation.height) else { return }
+                turnPage(dx < 0 ? 1 : -1)
+            }
+        )
+    }
+
+    private var interimHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(currentMeta.kicker.uppercased())
+                .font(.system(size: 12, weight: .semibold))
+                .tracking(3.2)
+                .foregroundStyle(ReadingPalette.brand(scheme))
+            Text(currentMeta.title)
+                .font(.system(size: fontSize * 1.9, weight: .bold, design: .serif))
+                .foregroundStyle(ReadingPalette.ink(scheme))
+        }
+        .frame(maxWidth: min(fontSize * 34, 720), alignment: .leading)
+    }
+
+    // MARK: Bottom bar (progress hairline + pacing controls)
+
+    private var chapterProgress: Double {
+        guard let pag = displayedPagination, pag.wordCount > 1 else { return 0 }
+        return Double(cursor) / Double(pag.wordCount - 1)
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: 10) {
+            // A whisper of progress under the page.
+            GeometryReader { geo in
+                Capsule()
+                    .fill(ReadingPalette.brand(scheme).opacity(0.4))
+                    .frame(width: max(geo.size.width * chapterProgress, 2), height: 2)
+            }
+            .frame(width: min(fontSize * 34, 720, max(pageArea.width, 60)), height: 2)
+            .opacity(displayedPagination == nil ? 0 : 1)
+
+            HStack(spacing: 2) {
+                controlButton("chevron.left", help: "Previous page") { turnPage(-1) }
+                    .keyboardShortcut(.leftArrow, modifiers: [])
+                    .disabled(pageIndex == 0)
+
+                Button(action: togglePlay) {
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(ReadingPalette.brand(scheme))
+                        .frame(width: 40, height: 34)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.space, modifiers: [])
+                .help(isPlaying ? "Pause pacing" : "Start pacing")
+
+                controlButton("chevron.right", help: "Next page") { turnPage(1) }
+                    .keyboardShortcut(.rightArrow, modifiers: [])
+                    .disabled(displayedPagination.map { pageIndex >= $0.pages.count - 1 } ?? true)
+
+                Divider()
+                    .frame(height: 16)
+                    .padding(.horizontal, 8)
+
+                Button {
+                    showPaceControls.toggle()
+                } label: {
+                    Text("\(Int(wpm)) wpm")
+                        .font(.system(size: 12, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(ReadingPalette.ink(scheme))
+                        .frame(height: 34)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Reading pace")
+                .popover(isPresented: $showPaceControls, arrowEdge: .top) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Pace")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 12) {
+                            Image(systemName: "tortoise")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            Slider(value: $wpm, in: PacingTunables.range, step: 10)
+                                .frame(width: 190)
+                            Image(systemName: "hare")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("\(Int(wpm)) words per minute")
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                }
+
+                if let pag = displayedPagination {
+                    Text("\(pageIndex + 1) of \(pag.pages.count)")
+                        .font(.system(size: 12))
+                        .monospacedDigit()
+                        .foregroundStyle(ReadingPalette.inkFaded(scheme))
+                        .padding(.leading, 8)
+                }
+
+                if book != nil, chapterIndex + 1 < sortedChapters.count,
+                   let pag = displayedPagination, pageIndex >= pag.pages.count - 1 {
+                    nextChapterButton
+                        .padding(.leading, 10)
+                        .transition(.opacity)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 4)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(ReadingPalette.brand(scheme).opacity(0.18)))
+        }
+    }
+
+    private func controlButton(
+        _ symbol: String, help: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(ReadingPalette.ink(scheme))
+                .frame(width: 32, height: 34)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private var nextChapterButton: some View {
+        Button {
+            chapterIndex += 1
+        } label: {
+            HStack(spacing: 6) {
+                Text("Next Chapter")
+                    .font(.system(size: 12, weight: .semibold, design: .serif))
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(ReadingPalette.brand(scheme))
+            .frame(height: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var chapterMenu: some ToolbarContent {
@@ -253,27 +599,6 @@ struct ReadingView: View {
         }
     }
 
-    private var nextChapterButton: some View {
-        Button {
-            chapterIndex += 1
-        } label: {
-            HStack(spacing: 8) {
-                Text("Next Chapter")
-                    .font(.system(size: 15, weight: .semibold, design: .serif))
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .foregroundStyle(ReadingPalette.brand(scheme))
-            .padding(.vertical, 10)
-            .padding(.horizontal, 18)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(ReadingPalette.brand(scheme).opacity(0.25)))
-        }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity)
-        .padding(.top, lineSpacing)
-    }
-
     private var backdrop: some View {
         RadialGradient(
             colors: [ReadingPalette.paperGlow(scheme), ReadingPalette.paper(scheme)],
@@ -282,29 +607,6 @@ struct ReadingView: View {
             endRadius: 900
         )
         .ignoresSafeArea()
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(currentMeta.kicker.uppercased())
-                .font(.system(size: 12, weight: .semibold))
-                .tracking(3.2)
-                .foregroundStyle(ReadingPalette.brand(scheme))
-            Text(currentMeta.title)
-                .font(.system(size: fontSize * 1.9, weight: .bold, design: .serif))
-                .foregroundStyle(ReadingPalette.ink(scheme))
-        }
-    }
-
-    private var sectionEndMark: some View {
-        HStack(spacing: 10) {
-            ForEach(0..<3, id: \.self) { _ in
-                Circle()
-                    .fill(ReadingPalette.brand(scheme).opacity(0.55))
-                    .frame(width: 4, height: 4)
-            }
-        }
-        .frame(maxWidth: .infinity)
     }
 
     private var typeButton: some View {
@@ -334,6 +636,12 @@ struct ReadingView: View {
             }
             .padding(16)
         }
+    }
+}
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
     }
 }
 
