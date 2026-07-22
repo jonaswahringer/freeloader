@@ -1,0 +1,9 @@
+# Prototype: WPM highlight cursor & page-turn animations
+
+Type: prototype (HITL)
+Status: open
+Blocked by: 04
+
+## Question
+
+How should pacing feel? On top of the approved reading view, build: the highlight cursor sweeping word-by-word at a configurable WPM (word-length/punctuation-weighted timing?), the WPM control, line-transition animation, auto page-turn when the cursor reaches page end, plus manual page-turn scroll behavior. Pause/resume and scrub-back-to-cursor behavior included. Consult `/ios-animations`. Iterate with the user until the motion feels right.
