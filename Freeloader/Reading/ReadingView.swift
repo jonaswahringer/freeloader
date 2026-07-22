@@ -4,6 +4,13 @@ import SwiftUI
 // word-starts, floating on parchment; a single amber word marks the reader.
 // User: an easily-pulled-away reader settling in for a focused session.
 // Emotional intent: CALM / FOCUSED — zero chrome, the screen IS the page.
+//
+// Performance model (ticket 12): bionic AttributedStrings are built off the
+// main thread by ChapterBuilder (actor, LRU cache keyed by chapter/size/
+// scheme) with neighbor-chapter prefetch, so chapter switches are cache hits.
+// The column is a LazyVStack, and the old whole-column `.animation(value:
+// fontSize)` is gone — resizes swap in a prebuilt column instead of
+// animating a full re-layout.
 
 // MARK: - Palette (seed 38°, analogous, WCAG-validated)
 
@@ -43,98 +50,23 @@ enum ReadingPalette {
     }
 }
 
-// MARK: - Bionic rendering
+// MARK: - Sample content (no-book preview)
 
-enum Bionic {
-    /// Bold-prefix length for a word with `letters` significant characters.
-    static func prefixCount(letters: Int) -> Int {
-        switch letters {
-        case ...0: 0
-        case 1...3: 1
-        case 4...5: 2
-        case 6...8: 3
-        default: Int((Double(letters) * 0.4).rounded(.up))
-        }
-    }
-
-    static func attributed(
-        _ paragraph: String,
-        size: CGFloat,
-        scheme: ColorScheme,
-        highlightWordIndex: Int? = nil
-    ) -> AttributedString {
-        let ink = ReadingPalette.ink(scheme)
-        let faded = ReadingPalette.inkFaded(scheme)
-        var result = AttributedString()
-        let words = paragraph.split(separator: " ", omittingEmptySubsequences: false)
-        for (i, word) in words.enumerated() {
-            if i > 0 {
-                var gap = AttributedString(" ")
-                gap.font = .system(size: size, design: .serif)
-                gap.kern = size * 0.28
-                result += gap
-            }
-            var rendered = bionicWord(String(word), size: size, ink: ink, faded: faded)
-            if i == highlightWordIndex {
-                rendered.backgroundColor = ReadingPalette.cursorHighlight(scheme)
-            }
-            result += rendered
-        }
-        return result
-    }
-
-    private static func bionicWord(
-        _ word: String, size: CGFloat, ink: Color, faded: Color
-    ) -> AttributedString {
-        let letters = word.unicodeScalars.filter {
-            CharacterSet.alphanumerics.contains($0)
-        }.count
-        let k = prefixCount(letters: letters)
-
-        var boldEnd = word.startIndex
-        var seen = 0
-        for idx in word.indices {
-            if word[idx].isLetter || word[idx].isNumber { seen += 1 }
-            if seen == k { boldEnd = word.index(after: idx); break }
-        }
-
-        var head = AttributedString(String(word[word.startIndex..<boldEnd]))
-        head.font = .system(size: size, weight: .bold, design: .serif)
-        head.foregroundColor = ink
-
-        var tail = AttributedString(String(word[boldEnd...]))
-        tail.font = .system(size: size, weight: .regular, design: .serif)
-        tail.foregroundColor = faded
-
-        return head + tail
-    }
-}
-
-// MARK: - Display content
-
-struct DisplaySection {
-    let title: String?
-    let paragraphs: [String]
-}
-
-struct DisplayChapter {
-    let kicker: String
-    let title: String
-    let sections: [DisplaySection]
-}
-
-// MARK: - Sample content
-
-struct SampleChapter {
-    let kicker = "Chapter 3"
-    let title = "The Shape of Attention"
-    let paragraphs: [String] = [
-        "Attention is not a spotlight you aim; it is a current you enter. Every reader knows the feeling of the current catching — the page dissolves, the room goes quiet, and the words stop being ink and start being thought. The tragedy of most reading tools is that they interrupt precisely this moment, mistaking engagement for stimulation.",
-        "The eye does not read letter by letter. It leaps in saccades, landing three or four characters into a word and inferring the rest from shape and context. A skilled reader recognizes whole word-forms the way a face is recognized: instantly, and without inspection. Anchoring the first few letters of each word gives the leaping eye a place to land — a stepping-stone path across the sentence.",
-        "This is why pacing matters more than speed. A metronome does not make a pianist faster; it makes her steady. When the pace is steady, the mind stops negotiating with itself about whether to continue, and the decision to read the next word — a decision the distracted mind makes hundreds of times a minute — is quietly retired.",
-        "What remains is comprehension, which has its own rhythm. Ideas arrive in paragraphs, not words. A reader who moves steadily through the text but pauses at its joints — the end of a section, the turn of an argument — retains more than one who sprints and rereads. The joints are where understanding is assembled.",
-        "So the instrument we want is neither a speed-reader nor a teleprompter. It is closer to a quiet companion: one finger resting on the line, moving at your pace, patient at the joints, and silent the rest of the time."
-    ]
+enum SampleChapter {
+    static let source = ChapterSource(
+        id: "sample",
+        kicker: "Chapter 3",
+        title: "The Shape of Attention",
+        sections: [
+            ChapterSource.Section(title: nil, text: [
+                "Attention is not a spotlight you aim; it is a current you enter. Every reader knows the feeling of the current catching — the page dissolves, the room goes quiet, and the words stop being ink and start being thought. The tragedy of most reading tools is that they interrupt precisely this moment, mistaking engagement for stimulation.",
+                "The eye does not read letter by letter. It leaps in saccades, landing three or four characters into a word and inferring the rest from shape and context. A skilled reader recognizes whole word-forms the way a face is recognized: instantly, and without inspection. Anchoring the first few letters of each word gives the leaping eye a place to land — a stepping-stone path across the sentence.",
+                "This is why pacing matters more than speed. A metronome does not make a pianist faster; it makes her steady. When the pace is steady, the mind stops negotiating with itself about whether to continue, and the decision to read the next word — a decision the distracted mind makes hundreds of times a minute — is quietly retired.",
+                "What remains is comprehension, which has its own rhythm. Ideas arrive in paragraphs, not words. A reader who moves steadily through the text but pauses at its joints — the end of a section, the turn of an argument — retains more than one who sprints and rereads. The joints are where understanding is assembled.",
+                "So the instrument we want is neither a speed-reader nor a teleprompter. It is closer to a quiet companion: one finger resting on the line, moving at your pace, patient at the joints, and silent the rest of the time."
+            ].joined(separator: "\n\n"))
+        ]
+    )
 }
 
 // MARK: - Reading view
@@ -144,6 +76,7 @@ struct ReadingView: View {
     @State private var fontSize: CGFloat = 25
     @State private var showTypeControls = false
     @State private var chapterIndex: Int = 0
+    @State private var built: BuiltChapter?
 
     var book: Book?
 
@@ -154,30 +87,64 @@ struct ReadingView: View {
         (book?.chapters ?? []).sorted { $0.index < $1.index }
     }
 
-    private var chapter: DisplayChapter {
+    /// Cheap value snapshot of the chapter at `index` (main thread; no text
+    /// processing — splitting/attributing happens in ChapterBuilder).
+    private func source(at index: Int) -> ChapterSource? {
+        guard let book else { return index == 0 ? SampleChapter.source : nil }
+        let chapters = sortedChapters
+        guard chapters.indices.contains(index) else { return nil }
+        let ch = chapters[index]
+        return ChapterSource(
+            id: "\(String(describing: ch.persistentModelID))",
+            kicker: book.title,
+            title: ch.title,
+            sections: ch.sections
+                .sorted { $0.index < $1.index }
+                .map { ChapterSource.Section(title: $0.title, text: $0.text) }
+        )
+    }
+
+    /// Cheap per-body-eval metadata (no section text access — SwiftData
+    /// string fetches stay out of the render path).
+    private struct ChapterMeta: Equatable {
+        let id: String
+        let kicker: String
+        let title: String
+    }
+
+    private var currentMeta: ChapterMeta {
         guard let book else {
-            let sample = SampleChapter()
-            return DisplayChapter(
-                kicker: sample.kicker,
-                title: sample.title,
-                sections: [DisplaySection(title: nil, paragraphs: sample.paragraphs)]
-            )
+            let s = SampleChapter.source
+            return ChapterMeta(id: s.id, kicker: s.kicker, title: s.title)
         }
         let chapters = sortedChapters
         guard chapters.indices.contains(chapterIndex) else {
-            return DisplayChapter(kicker: book.title, title: "Empty Book", sections: [])
+            return ChapterMeta(id: "empty", kicker: book.title, title: "Empty Book")
         }
         let ch = chapters[chapterIndex]
-        return DisplayChapter(
+        return ChapterMeta(
+            id: "\(String(describing: ch.persistentModelID))",
             kicker: book.title,
-            title: ch.title,
-            sections: ch.sections.sorted { $0.index < $1.index }.map {
-                DisplaySection(
-                    title: $0.title,
-                    paragraphs: $0.text.components(separatedBy: "\n\n").filter { !$0.isEmpty }
-                )
-            }
+            title: ch.title
         )
+    }
+
+    /// Only show built text that belongs to the current chapter — never
+    /// stale paragraphs under a new header. (Stale *sizes* of the same
+    /// chapter are fine: they keep text on screen during a resize.)
+    private var displayed: BuiltChapter? {
+        guard let built, built.sourceID == currentMeta.id else { return nil }
+        return built
+    }
+
+    private struct BuildRequest: Equatable {
+        let chapterID: String
+        let size: CGFloat
+        let dark: Bool
+    }
+
+    private var buildRequest: BuildRequest {
+        BuildRequest(chapterID: currentMeta.id, size: fontSize, dark: scheme == .dark)
     }
 
     var body: some View {
@@ -185,34 +152,32 @@ struct ReadingView: View {
             backdrop
 
             ScrollView {
-                VStack(alignment: .leading, spacing: lineSpacing * 1.6) {
+                LazyVStack(alignment: .leading, spacing: lineSpacing * 1.6) {
                     header
                         .padding(.bottom, lineSpacing)
 
-                    ForEach(Array(chapter.sections.enumerated()), id: \.offset) { _, section in
-                        if let title = section.title {
-                            Text(title)
-                                .font(.system(size: fontSize * 1.25, weight: .semibold, design: .serif))
-                                .foregroundStyle(ReadingPalette.ink(scheme))
-                                .padding(.top, lineSpacing)
+                    if let displayed {
+                        ForEach(Array(displayed.sections.enumerated()), id: \.offset) { _, section in
+                            if let title = section.title {
+                                Text(title)
+                                    .font(.system(size: fontSize * 1.25, weight: .semibold, design: .serif))
+                                    .foregroundStyle(ReadingPalette.ink(scheme))
+                                    .padding(.top, lineSpacing)
+                            }
+                            ForEach(section.paragraphs) { para in
+                                Text(para.text)
+                                    .lineSpacing(lineSpacing)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                            }
                         }
-                        ForEach(Array(section.paragraphs.enumerated()), id: \.offset) { _, para in
-                            Text(Bionic.attributed(
-                                para,
-                                size: fontSize,
-                                scheme: scheme
-                            ))
-                            .lineSpacing(lineSpacing)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
+
+                        sectionEndMark
+                            .padding(.top, lineSpacing)
+
+                        if book != nil, chapterIndex + 1 < sortedChapters.count {
+                            nextChapterButton
                         }
-                    }
-
-                    sectionEndMark
-                        .padding(.top, lineSpacing)
-
-                    if book != nil, chapterIndex + 1 < sortedChapters.count {
-                        nextChapterButton
                     }
                 }
                 .frame(maxWidth: columnWidth, alignment: .leading)
@@ -220,7 +185,6 @@ struct ReadingView: View {
                 .padding(.top, 64)
                 .padding(.bottom, 120)
                 .frame(maxWidth: .infinity)
-                .animation(.smooth(duration: 0.35), value: fontSize)
             }
             .id(chapterIndex)   // reset scroll offset on chapter change
         }
@@ -235,6 +199,37 @@ struct ReadingView: View {
         .onChange(of: chapterIndex) {
             book?.readingPosition?.chapterIndex = chapterIndex
             book?.readingPosition?.updatedAt = .now
+        }
+        .task(id: buildRequest) {
+            let request = buildRequest
+            // Full text snapshot happens only here, once per build request.
+            guard let src = source(at: chapterIndex) ?? (book == nil ? SampleChapter.source : nil) else {
+                built = nil
+                return
+            }
+            let result = await ChapterBuilder.shared.built(
+                for: src, size: request.size, scheme: scheme
+            )
+            guard !Task.isCancelled else { return }
+            if displayed == nil {
+                // First paint of this chapter: quick fade beats a pop-in.
+                withAnimation(.easeOut(duration: 0.15)) { built = result }
+            } else {
+                built = result
+            }
+            prefetchNeighbors(of: chapterIndex, size: request.size)
+        }
+    }
+
+    /// Warm the cache for the chapters the reader is most likely to open
+    /// next, so switching is a cache hit (instant).
+    private func prefetchNeighbors(of index: Int, size: CGFloat) {
+        let currentScheme = scheme
+        for neighbor in [index + 1, index - 1] {
+            guard let src = source(at: neighbor) else { continue }
+            Task.detached(priority: .utility) {
+                await ChapterBuilder.shared.prefetch(src, size: size, scheme: currentScheme)
+            }
         }
     }
 
@@ -291,11 +286,11 @@ struct ReadingView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(chapter.kicker.uppercased())
+            Text(currentMeta.kicker.uppercased())
                 .font(.system(size: 12, weight: .semibold))
                 .tracking(3.2)
                 .foregroundStyle(ReadingPalette.brand(scheme))
-            Text(chapter.title)
+            Text(currentMeta.title)
                 .font(.system(size: fontSize * 1.9, weight: .bold, design: .serif))
                 .foregroundStyle(ReadingPalette.ink(scheme))
         }
