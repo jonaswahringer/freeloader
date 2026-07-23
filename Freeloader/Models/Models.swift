@@ -83,6 +83,16 @@ final class DiscussionThread {
     var createdAt: Date
     var selectedText: String
     var kind: String // "define" | "explain"
+    /// Latest Claude CLI session id — follow-ups thread via `--resume`.
+    /// (Optional: pre-existing stores migrate cleanly; a lost session just
+    /// means the next follow-up re-sends the context block.)
+    var sessionID: String?
+    /// Where in the book the selection was made (for context re-assembly on
+    /// reopened threads, and jump-back later). All optional for migration.
+    var chapterIndex: Int?
+    var sectionIndex: Int?
+    /// Word index *within the section* (ContextAssembler convention).
+    var wordIndex: Int?
     var book: Book?
     @Relationship(deleteRule: .cascade, inverse: \ThreadMessage.thread)
     var messages: [ThreadMessage] = []

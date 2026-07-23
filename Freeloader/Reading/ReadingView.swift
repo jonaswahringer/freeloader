@@ -58,6 +58,21 @@ enum ReadingPalette {
             ? Color(hue: 0.1056, saturation: 0.75, brightness: 0.45).opacity(0.55)
             : Color(hue: 0.1056, saturation: 0.55, brightness: 0.92).opacity(0.9)
     }
+
+    /// Selection wash (ticket 08) — quieter than the cursor so the two read
+    /// as different intentions in the same amber language.
+    static func selectionHighlight(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(hue: 0.1056, saturation: 0.6, brightness: 0.55).opacity(0.3)
+            : Color(hue: 0.1056, saturation: 0.5, brightness: 0.88).opacity(0.6)
+    }
+
+    /// Dim behind the Define/Explain modal — warm-tinted, page still legible.
+    static func scrim(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(hue: 0.1056, saturation: 0.15, brightness: 0.03).opacity(0.55)
+            : Color(hue: 0.1056, saturation: 0.2, brightness: 0.25).opacity(0.28)
+    }
 }
 
 // MARK: - Sample content (no-book preview)
@@ -100,6 +115,15 @@ struct ReadingView: View {
     /// +1 forward, -1 backward — decides which way pages drift.
     @State private var turnDirection: Int = 1
     @State private var pageArea: CGSize = .zero
+
+    // Ticket 08: selection → Define/Explain → threaded modal.
+    /// Global word range of the reader's selection in the current chapter.
+    @State private var selection: Range<Int>?
+    /// True once the selection drag has ended (surfaces the small menu).
+    @State private var selectionMenuShown = false
+    /// The open Define/Explain modal, when any.
+    @State private var discussion: DiscussionController?
+    @State private var showHistory = false
 
     var book: Book?
 
@@ -206,8 +230,14 @@ struct ReadingView: View {
             .padding(.bottom, 16)
         }
         .overlay(alignment: .bottomTrailing) { typeButton }
+        .overlay { discussionOverlay }
         .preferredColorScheme(.dark)
-        .toolbar { if book != nil { chapterMenu } }
+        .toolbar {
+            if book != nil {
+                chapterMenu
+                historyButton
+            }
+        }
         .onAppear(perform: restore)
         .onDisappear {
             isPlaying = false
@@ -217,7 +247,11 @@ struct ReadingView: View {
             isPlaying = false
             cursor = 0
             pageIndex = 0
+            clearSelection()
             persistPosition()
+        }
+        .onChange(of: pageIndex) {
+            clearSelection()
         }
         .onChange(of: wpm) {
             book?.readingPosition?.wordsPerMinute = Int(wpm)
@@ -415,7 +449,22 @@ struct ReadingView: View {
                     scheme: scheme,
                     cursor: cursor,
                     magnify: !reduceMotion,
-                    onTapWord: { jump(toWord: $0) }
+                    selection: selection,
+                    menuVisible: selectionMenuShown,
+                    onTapWord: { jump(toWord: $0) },
+                    onSelectionChanged: { range in
+                        if range != nil, isPlaying { isPlaying = false }
+                        selectionMenuShown = false
+                        selection = range
+                    },
+                    onSelectionEnded: {
+                        guard selection != nil else { return }
+                        withAnimation(reduceMotion ? .default : ReadingMotion.controls) {
+                            selectionMenuShown = true
+                        }
+                    },
+                    onSelectionAction: handleSelectionAction,
+                    onSwipe: { turnPage($0) }
                 )
                 .id("\(pag.chapterID)#\(pageIndex)")
                 .transition(pageTransition)
@@ -468,8 +517,11 @@ struct ReadingView: View {
             .opacity(displayedPagination == nil ? 0 : 1)
 
             HStack(spacing: 2) {
+                // Plain-key shortcuts hand back to the keyboard while the
+                // modal is open (Space/arrows must type in the composer).
                 controlButton("chevron.left", help: "Previous page") { turnPage(-1) }
-                    .keyboardShortcut(.leftArrow, modifiers: [])
+                    .keyboardShortcut(discussion == nil
+                        ? KeyboardShortcut(.leftArrow, modifiers: []) : nil)
                     .disabled(pageIndex == 0)
 
                 Button(action: togglePlay) {
@@ -480,11 +532,13 @@ struct ReadingView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .keyboardShortcut(.space, modifiers: [])
+                .keyboardShortcut(discussion == nil
+                    ? KeyboardShortcut(.space, modifiers: []) : nil)
                 .help(isPlaying ? "Pause pacing" : "Start pacing")
 
                 controlButton("chevron.right", help: "Next page") { turnPage(1) }
-                    .keyboardShortcut(.rightArrow, modifiers: [])
+                    .keyboardShortcut(discussion == nil
+                        ? KeyboardShortcut(.rightArrow, modifiers: []) : nil)
                     .disabled(displayedPagination.map { pageIndex >= $0.pages.count - 1 } ?? true)
 
                 Divider()
@@ -636,6 +690,159 @@ struct ReadingView: View {
             }
             .padding(16)
         }
+    }
+}
+
+// MARK: - Discussion (ticket 08: select → Define/Explain → threaded modal)
+
+extension ReadingView {
+    private var sortedThreads: [DiscussionThread] {
+        (book?.threads ?? []).sorted { $0.createdAt > $1.createdAt }
+    }
+
+    var historyButton: some ToolbarContent {
+        ToolbarItem {
+            Button {
+                showHistory.toggle()
+            } label: {
+                Label("Discussions", systemImage: "bubble.left.and.bubble.right")
+            }
+            .help("Past discussions")
+            .popover(isPresented: $showHistory, arrowEdge: .bottom) {
+                ThreadHistoryList(
+                    threads: sortedThreads,
+                    onOpen: { thread in
+                        showHistory = false
+                        reopen(thread)
+                    },
+                    onDelete: { thread in
+                        modelContext.delete(thread)
+                    }
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    var discussionOverlay: some View {
+        if let discussion {
+            DiscussionModal(controller: discussion, onClose: closeDiscussion)
+                .transition(.opacity)
+        }
+    }
+
+    func clearSelection() {
+        guard selection != nil || selectionMenuShown else { return }
+        withAnimation(reduceMotion ? .default : ReadingMotion.controls) {
+            selection = nil
+            selectionMenuShown = false
+        }
+    }
+
+    func handleSelectionAction(_ action: SelectionAction) {
+        switch action {
+        case .dismiss:
+            clearSelection()
+        case .define, .explain:
+            openDiscussion(kind: action == .define ? "define" : "explain")
+        }
+    }
+
+    /// Fresh thread from the current selection. The reading position is
+    /// deliberately untouched — closing the modal reveals the page exactly
+    /// as it was, cursor included.
+    private func openDiscussion(kind: String) {
+        guard let pag = displayedPagination, let selection else { return }
+        let range = selection.clamped(to: 0..<pag.wordCount)
+        let words = pag.words[range]
+        guard let first = words.first else { return }
+        let text = words.map(\.plain).joined(separator: " ")
+
+        isPlaying = false
+        let thread = DiscussionThread(selectedText: text, kind: kind)
+        thread.chapterIndex = chapterIndex
+        thread.sectionIndex = first.sectionIndex
+        // ContextAssembler wants the word index *within the section*.
+        let sectionStart = pag.words.firstIndex { $0.sectionIndex == first.sectionIndex } ?? 0
+        thread.wordIndex = first.id - sectionStart
+
+        let context: AssembledContext
+        if let book {
+            modelContext.insert(thread)
+            thread.book = book
+            context = ContextAssembler.assemble(
+                book: book,
+                chapterIndex: chapterIndex,
+                sectionIndex: first.sectionIndex,
+                wordIndex: thread.wordIndex,
+                selection: text
+            )
+        } else {
+            context = sampleContext(selection: text)
+        }
+
+        let controller = DiscussionController(
+            thread: thread,
+            context: context,
+            modelContext: modelContext,
+            persists: book != nil
+        )
+        clearSelection()
+        withAnimation(reduceMotion ? .default : .smooth(duration: 0.2)) {
+            discussion = controller
+        }
+        controller.begin()
+    }
+
+    /// Reopen a stored thread from the history list — follow-ups resume the
+    /// persisted Claude session; context is re-assembled from the thread's
+    /// stored position in case that session is lost.
+    private func reopen(_ thread: DiscussionThread) {
+        guard let book else { return }
+        isPlaying = false
+        let context = ContextAssembler.assemble(
+            book: book,
+            chapterIndex: thread.chapterIndex ?? chapterIndex,
+            sectionIndex: thread.sectionIndex ?? 0,
+            wordIndex: thread.wordIndex,
+            selection: thread.selectedText
+        )
+        let controller = DiscussionController(
+            thread: thread, context: context, modelContext: modelContext
+        )
+        withAnimation(reduceMotion ? .default : .smooth(duration: 0.2)) {
+            discussion = controller
+        }
+        controller.begin() // no-ops on threads that already have messages
+    }
+
+    private func closeDiscussion() {
+        discussion?.cancel()
+        withAnimation(reduceMotion ? .default : .smooth(duration: 0.18)) {
+            discussion = nil
+        }
+    }
+
+    /// Context for the no-book sample chapter: excerpt only, nothing
+    /// persisted, no wiki on disk.
+    private func sampleContext(selection: String) -> AssembledContext {
+        let text = SampleChapter.source.sections.first?.text ?? ""
+        return AssembledContext(
+            workingDirectory: nil,
+            systemPrompt: ContextAssembler.companionRole,
+            contextBlock: """
+            You are helping a reader inside a sample chapter titled \
+            “The Shape of Attention”.
+
+            The passage around the reader's position:
+            <excerpt>
+            \(text)
+            </excerpt>
+
+            The reader selected this text:
+            <selection>\(selection)</selection>
+            """
+        )
     }
 }
 

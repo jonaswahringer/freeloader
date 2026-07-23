@@ -8,6 +8,12 @@ import SwiftUI
 // a raised-cosine falloff, and nothing ever reflows. A single amber capsule
 // slides under the current word (one spring, not a per-word storm), and a
 // spatial tap anywhere on the page jumps the cursor to the nearest word.
+//
+// Ticket 08 adds selection: a drag that STARTS on a word sweeps out a word
+// range (per-line amber wash behind the text), and releasing surfaces the
+// small Define/Explain menu above the selection. Drags that start on
+// whitespace still read as page-turn swipes; a tap while a selection exists
+// clears it instead of jumping the cursor.
 
 struct PageView: View {
     let page: BuiltPage
@@ -17,7 +23,20 @@ struct PageView: View {
     /// Global word index of the cursor (may be on another page).
     let cursor: Int
     let magnify: Bool
+    /// In-progress or committed selection (global word indices).
+    let selection: Range<Int>?
+    /// True once a selection drag has ended — shows the Define/Explain menu.
+    let menuVisible: Bool
     let onTapWord: (Int) -> Void
+    let onSelectionChanged: (Range<Int>?) -> Void
+    let onSelectionEnded: () -> Void
+    let onSelectionAction: (SelectionAction) -> Void
+    /// Swipe-like drag that didn't start on a word: +1 next page, -1 previous.
+    let onSwipe: (Int) -> Void
+
+    /// Transient drag state (resets with the page's identity).
+    @State private var dragAnchor: Int?
+    @State private var dragIsSwipe = false
 
     private var pageWords: ArraySlice<PageWord> {
         paginated.words[page.wordRange]
@@ -30,6 +49,15 @@ struct PageView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
+            // Selection wash: one rounded rect per selected line, behind
+            // both the cursor capsule and the text.
+            ForEach(Array(selectionRects.enumerated()), id: \.offset) { _, rect in
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(ReadingPalette.selectionHighlight(scheme))
+                    .frame(width: rect.width + 9, height: rect.height + 4)
+                    .position(x: rect.midX, y: rect.midY + 1)
+            }
+
             // The amber cursor: one capsule sliding beneath the line.
             if let current = currentWord {
                 let pad = MagnifierTunables.highlightPadding
@@ -54,16 +82,108 @@ struct PageView: View {
                 WordGlyph(word: word, scale: scale(for: word))
                     .equatable()
             }
+
+            if menuVisible, let position = menuPosition {
+                SelectionMenu(scheme: scheme, onAction: onSelectionAction)
+                    .position(position)
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+            }
         }
         .frame(width: spec.columnWidth, height: spec.pageHeight, alignment: .topLeading)
         .contentShape(Rectangle())
+        .gesture(selectionOrSwipeDrag)
         .gesture(
             SpatialTapGesture().onEnded { tap in
-                if let hit = nearestWord(to: tap.location) {
+                if selection != nil {
+                    onSelectionAction(.dismiss)
+                } else if let hit = nearestWord(to: tap.location) {
                     onTapWord(hit.id)
                 }
             }
         )
+    }
+
+    // MARK: Selection drag (falls back to a page-turn swipe off-text)
+
+    private var selectionOrSwipeDrag: some Gesture {
+        DragGesture(minimumDistance: 5)
+            .onChanged { value in
+                if dragAnchor == nil && !dragIsSwipe {
+                    if let hit = selectionHit(value.startLocation, maxCost: 460) {
+                        dragAnchor = hit.id
+                    } else {
+                        dragIsSwipe = true
+                    }
+                }
+                if let anchor = dragAnchor, let current = selectionHit(value.location) {
+                    let lo = min(anchor, current.id)
+                    let hi = max(anchor, current.id)
+                    onSelectionChanged(lo..<(hi + 1))
+                }
+            }
+            .onEnded { value in
+                let wasSelecting = dragAnchor != nil
+                dragAnchor = nil
+                dragIsSwipe = false
+                if wasSelecting {
+                    onSelectionEnded()
+                } else {
+                    let dx = value.translation.width
+                    if abs(dx) > 60, abs(dx) > abs(value.translation.height) {
+                        onSwipe(dx < 0 ? 1 : -1)
+                    }
+                }
+            }
+    }
+
+    /// Word nearest the point for selection: line distance dominates, then
+    /// horizontal distance — so sweeping below a line still tracks it.
+    /// `maxCost` gates drag *starts* (must begin close to actual text).
+    private func selectionHit(
+        _ point: CGPoint, maxCost: CGFloat = .infinity
+    ) -> PageWord? {
+        var best: (word: PageWord, cost: CGFloat)?
+        for word in pageWords {
+            let f = word.frame
+            let dy = max(0, max(f.minY - point.y, point.y - f.maxY))
+            let dx = max(0, max(f.minX - point.x, point.x - f.maxX))
+            let cost = dy * 100 + dx
+            if cost < (best?.cost ?? .infinity) { best = (word, cost) }
+        }
+        guard let best, best.cost <= maxCost else { return nil }
+        return best.word
+    }
+
+    /// One rect per selected line on this page.
+    private var selectionRects: [CGRect] {
+        guard let selection else { return [] }
+        let clamped = selection.clamped(to: page.wordRange)
+        guard !clamped.isEmpty else { return [] }
+        var rects: [CGRect] = []
+        var current: CGRect?
+        for word in paginated.words[clamped] {
+            if let c = current, abs(c.minY - word.frame.minY) < 1 {
+                current = c.union(word.frame)
+            } else {
+                if let c = current { rects.append(c) }
+                current = word.frame
+            }
+        }
+        if let c = current { rects.append(c) }
+        return rects
+    }
+
+    /// Menu floats above the selection's first line (below the last line
+    /// when the selection starts too close to the page top), clamped into
+    /// the column.
+    private var menuPosition: CGPoint? {
+        guard let first = selectionRects.first, let last = selectionRects.last else {
+            return nil
+        }
+        let halfWidth: CGFloat = 95
+        let x = min(max(first.midX, halfWidth), max(spec.columnWidth - halfWidth, halfWidth))
+        let y = first.minY > 52 ? first.minY - 30 : last.maxY + 32
+        return CGPoint(x: x, y: y)
     }
 
     /// Dock falloff: only the cursor's own line swells, by word distance.
