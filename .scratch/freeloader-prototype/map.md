@@ -19,7 +19,7 @@ A working prototype of **Freeloader** — a SwiftUI multiplatform (macOS-first, 
 - Destination is a **working prototype**, full-featured: core reading + PDF import + Define/Explain/LLM wiki + retention & notes (grilling, 2026-07-22).
 - **Platform:** SwiftUI multiplatform, macOS-first; iPad layouts kept working along the way.
 - **LLM backend:** Claude Code CLI headless (`claude -p`) on macOS via user's subscription; no API key, no server. iPad LLM deferred (fog).
-- **Reading mode:** full bionic page (bold prefixes) with a highlight cursor sweeping word-by-word at the user's WPM, auto page-turns; pacing guides, doesn't force.
+- **Reading mode:** full bionic page (bold prefixes) with a highlight cursor sweeping word-by-word at the user's WPM, auto page-turns; pacing guides, doesn't force. *(Under revision: the paginated surface is being replaced by infinite scroll — see the open tickets [Prototype: infinite scroll instead of page turns](issues/13-infinite-scroll-reading.md) and [Prototype: auto-scroll keeping the cursor centered](issues/14-auto-scroll-centered-cursor.md); uniform prefix-bolding is being reconsidered in [Research: smarter bionic emphasis](issues/15-smarter-bionic-emphasis.md).)*
 - **PDF import:** text-based PDFs via PDFKit, reflowed into our renderer; chapter/section detection heuristic + LLM assist. No OCR.
 - **Wiki:** internal context only — background analysis writes per-chapter summaries/glossary/key ideas as markdown files feeding Define/Explain and retention grading. No wiki UI.
 - **Define/Explain UX:** modal over the reading view; expandable follow-up thread inside the modal; threads saved to history; back/close returns to exact reading position.
