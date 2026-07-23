@@ -35,6 +35,10 @@ enum MagnifierTunables {
     static let anchor = UnitPoint(x: 0.5, y: 0.82)
     /// Extra ink opacity boost for the magnified word (0 = none).
     static let highlightPadding = CGSize(width: 10, height: 4)
+    /// Fraction of the swollen words' extra width that same-line neighbors
+    /// are pushed outward by (Dock push-apart). 1 = exact no-overlap
+    /// compensation, 0 = words bleed into each other when magnified.
+    static let pushApart: CGFloat = 1.0
 
     /// Raised-cosine falloff: 1 at distance 0 → 0 at `radius`.
     static func scale(distance: Double) -> CGFloat {

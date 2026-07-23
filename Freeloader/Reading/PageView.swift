@@ -94,7 +94,7 @@ struct PageView: View {
             }
 
             ForEach(pageWords) { word in
-                WordGlyph(word: word, scale: scale(for: word))
+                WordGlyph(word: word, scale: scale(for: word), xOffset: xOffset(for: word))
                     .equatable()
             }
 
@@ -220,6 +220,30 @@ struct PageView: View {
         return MagnifierTunables.scale(distance: Double(abs(word.id - current.id)))
     }
 
+    /// Dock push-apart: neighbors on the cursor's line shift outward so the
+    /// swollen words never overlap. A word moves by half the cursor word's
+    /// extra width, the full extra width of every swollen word between them
+    /// (ids on one line are contiguous), and half its own — the spacing each
+    /// pair needs to keep its original gap.
+    private func xOffset(for word: PageWord) -> CGFloat {
+        guard magnify,
+              let current = currentWord,
+              word.id != current.id,
+              abs(word.frame.minY - current.frame.minY) < 1
+        else { return 0 }
+        var shift = (extraWidth(of: current) + extraWidth(of: word)) / 2
+        for id in (min(word.id, current.id) + 1)..<max(word.id, current.id) {
+            shift += extraWidth(of: paginated.words[id])
+        }
+        let direction: CGFloat = word.id > current.id ? 1 : -1
+        return direction * shift * MagnifierTunables.pushApart
+    }
+
+    /// Width a word gains from magnification (0 when outside the falloff).
+    private func extraWidth(of word: PageWord) -> CGFloat {
+        word.frame.width * (scale(for: word) - 1)
+    }
+
     /// Word whose (slightly inflated) frame contains or is nearest the point.
     private func nearestWord(to point: CGPoint) -> PageWord? {
         var best: (word: PageWord, distance: CGFloat)?
@@ -265,10 +289,12 @@ struct PageView: View {
 struct WordGlyph: View, Equatable {
     let word: PageWord
     let scale: CGFloat
+    let xOffset: CGFloat
 
     static func == (lhs: WordGlyph, rhs: WordGlyph) -> Bool {
         lhs.word.id == rhs.word.id
             && lhs.scale == rhs.scale
+            && lhs.xOffset == rhs.xOffset
             && lhs.word.frame == rhs.word.frame
     }
 
@@ -276,6 +302,6 @@ struct WordGlyph: View, Equatable {
         Text(word.text)
             .fixedSize()
             .scaleEffect(scale, anchor: MagnifierTunables.anchor)
-            .position(x: word.frame.midX, y: word.frame.midY)
+            .position(x: word.frame.midX + xOffset, y: word.frame.midY)
     }
 }
