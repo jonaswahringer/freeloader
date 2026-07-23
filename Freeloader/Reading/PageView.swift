@@ -43,6 +43,11 @@ struct PageView: View {
     /// Transient drag state (resets with the page's identity).
     @State private var dragAnchor: Int?
     @State private var dragIsSwipe = false
+    /// Last single-tap (word id + time): a second tap on the same word within
+    /// `doubleTapWindow` upgrades to a one-word selection with the menu shown,
+    /// so double-clicking the highlighted word reaches Define/Explain/Note.
+    @State private var lastTap: (word: Int, at: Date)?
+    private static let doubleTapWindow: TimeInterval = 0.35
 
     private var pageWords: ArraySlice<PageWord> {
         paginated.words[page.wordRange]
@@ -109,10 +114,22 @@ struct PageView: View {
         .gesture(selectionOrSwipeDrag)
         .gesture(
             SpatialTapGesture().onEnded { tap in
-                if selection != nil {
-                    onSelectionAction(.dismiss)
-                } else if let hit = nearestWord(to: tap.location) {
-                    onTapWord(hit.id)
+                guard let hit = nearestWord(to: tap.location) else {
+                    if selection != nil { onSelectionAction(.dismiss) }
+                    return
+                }
+                if let last = lastTap, last.word == hit.id,
+                   Date().timeIntervalSince(last.at) < Self.doubleTapWindow {
+                    lastTap = nil
+                    onSelectionChanged(hit.id..<(hit.id + 1))
+                    onSelectionEnded()
+                } else {
+                    lastTap = (hit.id, Date())
+                    if selection != nil {
+                        onSelectionAction(.dismiss)
+                    } else {
+                        onTapWord(hit.id)
+                    }
                 }
             }
         )
