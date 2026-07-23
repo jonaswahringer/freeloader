@@ -27,6 +27,12 @@ struct PageView: View {
     let selection: Range<Int>?
     /// True once a selection drag has ended — shows the Define/Explain menu.
     let menuVisible: Bool
+    /// Whether the selection menu offers the Note action (needs a real book).
+    let canNote: Bool
+    /// Anchored notes intersecting this chapter (ticket 10), as global word
+    /// ranges — rendered as faint amber underlines, a pencil line in the
+    /// margin rather than a highlighter smear.
+    let noteRanges: [Range<Int>]
     let onTapWord: (Int) -> Void
     let onSelectionChanged: (Range<Int>?) -> Void
     let onSelectionEnded: () -> Void
@@ -49,6 +55,15 @@ struct PageView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
+            // Note underlines: a thin amber pencil line beneath each noted
+            // line — persistent, quieter than both cursor and selection.
+            ForEach(Array(noteRects.enumerated()), id: \.offset) { _, rect in
+                Capsule()
+                    .fill(ReadingPalette.noteUnderline(scheme))
+                    .frame(width: rect.width + 4, height: 2)
+                    .position(x: rect.midX, y: rect.maxY + 3.5)
+            }
+
             // Selection wash: one rounded rect per selected line, behind
             // both the cursor capsule and the text.
             ForEach(Array(selectionRects.enumerated()), id: \.offset) { _, rect in
@@ -84,7 +99,7 @@ struct PageView: View {
             }
 
             if menuVisible, let position = menuPosition {
-                SelectionMenu(scheme: scheme, onAction: onSelectionAction)
+                SelectionMenu(scheme: scheme, canNote: canNote, onAction: onSelectionAction)
                     .position(position)
                     .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
@@ -157,7 +172,17 @@ struct PageView: View {
     /// One rect per selected line on this page.
     private var selectionRects: [CGRect] {
         guard let selection else { return [] }
-        let clamped = selection.clamped(to: page.wordRange)
+        return lineRects(of: selection)
+    }
+
+    /// Per-line rects for every note range that touches this page.
+    private var noteRects: [CGRect] {
+        noteRanges.flatMap(lineRects(of:))
+    }
+
+    /// Groups a global word range into one rect per rendered line.
+    private func lineRects(of range: Range<Int>) -> [CGRect] {
+        let clamped = range.clamped(to: page.wordRange)
         guard !clamped.isEmpty else { return [] }
         var rects: [CGRect] = []
         var current: CGRect?
@@ -180,7 +205,7 @@ struct PageView: View {
         guard let first = selectionRects.first, let last = selectionRects.last else {
             return nil
         }
-        let halfWidth: CGFloat = 95
+        let halfWidth: CGFloat = canNote ? 128 : 95
         let x = min(max(first.midX, halfWidth), max(spec.columnWidth - halfWidth, halfWidth))
         let y = first.minY > 52 ? first.minY - 30 : last.maxY + 32
         return CGPoint(x: x, y: y)

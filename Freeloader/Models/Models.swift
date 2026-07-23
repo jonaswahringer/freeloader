@@ -121,17 +121,32 @@ final class ThreadMessage {
 @Model
 final class Note {
     var createdAt: Date
+    /// The passage the note is anchored to (display excerpt + fallback).
     var anchoredText: String?
+    /// Anchor: chapter + section + word offset *within the section* + word
+    /// count (same convention as DiscussionThread / ContextAssembler).
+    /// Layout-independent, so it survives restarts, resizes, and font
+    /// changes. All optional for store migration.
     var chapterIndex: Int?
     var sectionIndex: Int?
+    var wordIndex: Int?
+    var wordLength: Int?
+    /// "selection" (Note action on the page) | "thread" (saved from a
+    /// Define/Explain answer).
+    var source: String?
+    /// The reader's own thought (may be empty for a bare highlight), or the
+    /// saved answer text for thread-sourced notes.
     var text: String
     var book: Book?
 
-    init(createdAt: Date = .now, anchoredText: String? = nil, chapterIndex: Int? = nil, sectionIndex: Int? = nil, text: String) {
+    init(createdAt: Date = .now, anchoredText: String? = nil, chapterIndex: Int? = nil, sectionIndex: Int? = nil, wordIndex: Int? = nil, wordLength: Int? = nil, source: String? = nil, text: String) {
         self.createdAt = createdAt
         self.anchoredText = anchoredText
         self.chapterIndex = chapterIndex
         self.sectionIndex = sectionIndex
+        self.wordIndex = wordIndex
+        self.wordLength = wordLength
+        self.source = source
         self.text = text
     }
 }

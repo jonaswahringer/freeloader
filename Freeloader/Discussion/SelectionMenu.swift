@@ -1,19 +1,21 @@
 import SwiftUI
 
 // The little amber affordance that surfaces when the reader selects words
-// on the page (ticket 08). Two actions for now; ticket 10 adds `.note` as a
-// third item — the enum and the pill layout leave room for it.
+// on the page (ticket 08). Ticket 10 adds `.note` — anchor a note to the
+// selected passage (hidden in the sample chapter, where nothing persists).
 
 enum SelectionAction {
     case define
     case explain
-    // case note — ticket 10
+    case note
     /// Tap-away / escape: clear the selection without acting on it.
     case dismiss
 }
 
 struct SelectionMenu: View {
     let scheme: ColorScheme
+    /// False in the no-book sample chapter — notes need somewhere to live.
+    var canNote: Bool = true
     let onAction: (SelectionAction) -> Void
 
     var body: some View {
@@ -21,6 +23,10 @@ struct SelectionMenu: View {
             item("character.book.closed", "Define", .define)
             divider
             item("sparkles", "Explain", .explain)
+            if canNote {
+                divider
+                item("bookmark", "Note", .note)
+            }
         }
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(ReadingPalette.brand(scheme).opacity(0.35)))

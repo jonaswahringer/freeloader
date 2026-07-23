@@ -67,6 +67,14 @@ enum ReadingPalette {
             : Color(hue: 0.1056, saturation: 0.5, brightness: 0.88).opacity(0.6)
     }
 
+    /// Note underline (ticket 10) — the quietest amber on the page: a
+    /// persistent pencil line that must never fight the pacing cursor.
+    static func noteUnderline(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(hue: 0.1056, saturation: 0.65, brightness: 0.58).opacity(0.42)
+            : Color(hue: 0.1056, saturation: 0.6, brightness: 0.6).opacity(0.5)
+    }
+
     /// Dim behind the Define/Explain modal — warm-tinted, page still legible.
     static func scrim(_ scheme: ColorScheme) -> Color {
         scheme == .dark
@@ -124,6 +132,17 @@ struct ReadingView: View {
     /// The open Define/Explain modal, when any.
     @State private var discussion: DiscussionController?
     @State private var showHistory = false
+
+    // Ticket 10: anchored notes.
+    /// Anchor captured from the selection while the note composer is open.
+    @State private var noteTarget: NoteDraftTarget?
+    @State private var showNotes = false
+    /// This chapter's note anchors as global word ranges (recomputed off the
+    /// render path — see `noteAnchorKey`).
+    @State private var noteRanges: [Range<Int>] = []
+    /// Jump-back target waiting for another chapter's pagination to land.
+    @State private var pendingJump: NoteJump?
+    @State private var noteSaves = 0
 
     var book: Book?
 
@@ -231,10 +250,13 @@ struct ReadingView: View {
         }
         .overlay(alignment: .bottomTrailing) { typeButton }
         .overlay { discussionOverlay }
+        .overlay { noteComposerOverlay }
+        .sensoryFeedback(.success, trigger: noteSaves)
         .preferredColorScheme(.dark)
         .toolbar {
             if book != nil {
                 chapterMenu
+                notesButton
                 historyButton
             }
         }
@@ -258,6 +280,7 @@ struct ReadingView: View {
         }
         .task(id: pipelineRequest) { await runPipeline() }
         .task(id: isPlaying) { await playbackLoop() }
+        .task(id: noteAnchorKey) { recomputeNoteRanges() }
     }
 
     // MARK: Pipeline: build (cached) → paginate (cached) → present
@@ -305,6 +328,12 @@ struct ReadingView: View {
                 cursor = max(target, 0)
                 pageIndex = pages.pageIndex(ofWord: cursor)
             }
+        }
+        // A notes-list jump into another chapter completes here, once the
+        // target chapter's pagination has landed.
+        if let jump = pendingJump, jump.chapterIndex == chapterIndex {
+            pendingJump = nil
+            apply(jump, in: pages)
         }
     }
 
@@ -451,6 +480,8 @@ struct ReadingView: View {
                     magnify: !reduceMotion,
                     selection: selection,
                     menuVisible: selectionMenuShown,
+                    canNote: book != nil,
+                    noteRanges: noteRanges,
                     onTapWord: { jump(toWord: $0) },
                     onSelectionChanged: { range in
                         if range != nil, isPlaying { isPlaying = false }
@@ -505,6 +536,12 @@ struct ReadingView: View {
         return Double(cursor) / Double(pag.wordCount - 1)
     }
 
+    /// Plain-key shortcuts (Space/arrows) belong to the page only while no
+    /// modal composer needs the keyboard.
+    private var plainKeysActive: Bool {
+        discussion == nil && noteTarget == nil
+    }
+
     private var bottomBar: some View {
         VStack(spacing: 10) {
             // A whisper of progress under the page.
@@ -517,10 +554,10 @@ struct ReadingView: View {
             .opacity(displayedPagination == nil ? 0 : 1)
 
             HStack(spacing: 2) {
-                // Plain-key shortcuts hand back to the keyboard while the
-                // modal is open (Space/arrows must type in the composer).
+                // Plain-key shortcuts hand back to the keyboard while a
+                // modal is open (Space/arrows must type in the composers).
                 controlButton("chevron.left", help: "Previous page") { turnPage(-1) }
-                    .keyboardShortcut(discussion == nil
+                    .keyboardShortcut(plainKeysActive
                         ? KeyboardShortcut(.leftArrow, modifiers: []) : nil)
                     .disabled(pageIndex == 0)
 
@@ -532,12 +569,12 @@ struct ReadingView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .keyboardShortcut(discussion == nil
+                .keyboardShortcut(plainKeysActive
                     ? KeyboardShortcut(.space, modifiers: []) : nil)
                 .help(isPlaying ? "Pause pacing" : "Start pacing")
 
                 controlButton("chevron.right", help: "Next page") { turnPage(1) }
-                    .keyboardShortcut(discussion == nil
+                    .keyboardShortcut(plainKeysActive
                         ? KeyboardShortcut(.rightArrow, modifiers: []) : nil)
                     .disabled(displayedPagination.map { pageIndex >= $0.pages.count - 1 } ?? true)
 
@@ -745,6 +782,8 @@ extension ReadingView {
             clearSelection()
         case .define, .explain:
             openDiscussion(kind: action == .define ? "define" : "explain")
+        case .note:
+            openNoteComposer()
         }
     }
 
@@ -843,6 +882,187 @@ extension ReadingView {
             <selection>\(selection)</selection>
             """
         )
+    }
+}
+
+// MARK: - Notes (ticket 10: anchored passages, compose, list, jump-back)
+
+extension ReadingView {
+    /// A note anchor being navigated to (possibly across a chapter switch).
+    struct NoteJump: Equatable {
+        let chapterIndex: Int
+        let sectionIndex: Int
+        /// Word offset within the section (layout-independent).
+        let wordIndex: Int
+    }
+
+    private var sortedNotes: [Note] {
+        (book?.notes ?? []).sorted { $0.createdAt > $1.createdAt }
+    }
+
+    /// Cheap fingerprint of this chapter's note anchors + the displayed
+    /// pagination — global ranges are recomputed only when it changes, so
+    /// the per-word cursor ticks never pay for anchor resolution.
+    private var noteAnchorKey: NoteAnchorKey {
+        let anchors = (book?.notes ?? []).flatMap { note -> [Int] in
+            guard note.chapterIndex == chapterIndex else { return [] }
+            return [note.sectionIndex ?? 0, note.wordIndex ?? 0, note.wordLength ?? 1]
+        }
+        return NoteAnchorKey(chapterID: displayedPagination?.chapterID, anchors: anchors)
+    }
+
+    struct NoteAnchorKey: Equatable {
+        let chapterID: String?
+        let anchors: [Int]
+    }
+
+    private func recomputeNoteRanges() {
+        guard let book, let pag = displayedPagination else {
+            noteRanges = []
+            return
+        }
+        // One scan for section start offsets, then O(1) per note.
+        var sectionStart: [Int: Int] = [:]
+        for (i, word) in pag.words.enumerated() where sectionStart[word.sectionIndex] == nil {
+            sectionStart[word.sectionIndex] = i
+        }
+        noteRanges = book.notes.compactMap { note in
+            guard note.chapterIndex == chapterIndex,
+                  let start = sectionStart[note.sectionIndex ?? 0] else { return nil }
+            let lo = start + max(note.wordIndex ?? 0, 0)
+            guard lo < pag.wordCount else { return nil }
+            let hi = min(lo + max(note.wordLength ?? 1, 1), pag.wordCount)
+            return lo..<hi
+        }
+    }
+
+    // MARK: Compose
+
+    /// Capture the selection as a note anchor and float the composer. The
+    /// selection wash stays lit underneath so the reader sees exactly what
+    /// the note will hold.
+    private func openNoteComposer() {
+        guard book != nil, let pag = displayedPagination, let selection else { return }
+        let range = selection.clamped(to: 0..<pag.wordCount)
+        let words = pag.words[range]
+        guard let first = words.first else { return }
+        isPlaying = false
+        let sectionStart = pag.words.firstIndex { $0.sectionIndex == first.sectionIndex } ?? 0
+        let target = NoteDraftTarget(
+            excerpt: words.map(\.plain).joined(separator: " "),
+            chapterIndex: chapterIndex,
+            sectionIndex: first.sectionIndex,
+            wordIndex: first.id - sectionStart,
+            wordLength: range.count
+        )
+        withAnimation(reduceMotion ? .default : ReadingMotion.controls) {
+            selectionMenuShown = false
+        }
+        withAnimation(reduceMotion ? .default : .smooth(duration: 0.2)) {
+            noteTarget = target
+        }
+    }
+
+    @ViewBuilder
+    var noteComposerOverlay: some View {
+        if let noteTarget {
+            NoteComposer(
+                target: noteTarget,
+                onSave: { saveNote($0) },
+                onCancel: dismissNoteComposer
+            )
+            .transition(.opacity)
+        }
+    }
+
+    private func saveNote(_ thought: String) {
+        guard let book, let target = noteTarget else { return }
+        let note = Note(
+            anchoredText: target.excerpt,
+            chapterIndex: target.chapterIndex,
+            sectionIndex: target.sectionIndex,
+            wordIndex: target.wordIndex,
+            wordLength: target.wordLength,
+            source: "selection",
+            text: thought
+        )
+        modelContext.insert(note)
+        note.book = book
+        noteSaves += 1
+        dismissNoteComposer()
+        // The underline fades in as the composer leaves.
+        recomputeNoteRanges()
+    }
+
+    private func dismissNoteComposer() {
+        withAnimation(reduceMotion ? .default : .smooth(duration: 0.18)) {
+            noteTarget = nil
+        }
+        clearSelection()
+    }
+
+    // MARK: List + jump-back
+
+    var notesButton: some ToolbarContent {
+        ToolbarItem {
+            Button {
+                showNotes.toggle()
+            } label: {
+                Label("Notes", systemImage: "bookmark")
+            }
+            .help("This book's notes")
+            .popover(isPresented: $showNotes, arrowEdge: .bottom) {
+                NotesList(
+                    notes: sortedNotes,
+                    chapterTitles: Dictionary(
+                        uniqueKeysWithValues: sortedChapters.enumerated()
+                            .map { ($0.offset, $0.element.title) }
+                    ),
+                    onOpen: { note in
+                        showNotes = false
+                        jump(to: note)
+                    },
+                    onDelete: { note in
+                        modelContext.delete(note)
+                        recomputeNoteRanges()
+                    }
+                )
+            }
+        }
+    }
+
+    /// Ride back to the note's passage: same chapter jumps immediately;
+    /// another chapter switches and completes the jump when its pagination
+    /// lands (see `present`).
+    private func jump(to note: Note) {
+        guard book != nil, let targetChapter = note.chapterIndex else { return }
+        isPlaying = false
+        let jump = NoteJump(
+            chapterIndex: targetChapter,
+            sectionIndex: note.sectionIndex ?? 0,
+            wordIndex: note.wordIndex ?? 0
+        )
+        if targetChapter == chapterIndex, let pag = displayedPagination {
+            apply(jump, in: pag)
+        } else {
+            pendingJump = jump
+            chapterIndex = targetChapter
+        }
+    }
+
+    /// Land the cursor on the note's first word — the amber cursor itself
+    /// marks the spot, resting on the underlined passage.
+    func apply(_ jump: NoteJump, in pag: PaginatedChapter) {
+        guard pag.wordCount > 0 else { return }
+        let sectionStart = pag.words.firstIndex { $0.sectionIndex == jump.sectionIndex } ?? 0
+        let global = min(max(sectionStart + jump.wordIndex, 0), pag.wordCount - 1)
+        let targetPage = pag.pageIndex(ofWord: global)
+        turnDirection = targetPage >= pageIndex ? 1 : -1
+        withAnimation(reduceMotion ? .default : ReadingMotion.pageTurn) {
+            pageIndex = targetPage
+            cursor = global
+        }
+        persistPosition()
     }
 }
 

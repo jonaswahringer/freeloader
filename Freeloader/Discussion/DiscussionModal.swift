@@ -19,12 +19,16 @@ import SwiftData
 struct DiscussionModal: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.modelContext) private var modelContext
 
     let controller: DiscussionController
     let onClose: () -> Void
 
     @State private var draft = ""
     @State private var appeared = false
+    /// Messages saved to notes during THIS presentation (already-saved ones
+    /// are detected against the book's notes by content).
+    @State private var savedInSession: Set<PersistentIdentifier> = []
     @FocusState private var composerFocused: Bool
 
     private var thread: DiscussionThread { controller.thread }
@@ -169,12 +173,73 @@ struct DiscussionModal: View {
             .padding(.top, 4)
         } else {
             // Answer: the same reading serif the page uses, a size down.
-            Text(message.text)
-                .font(.system(size: 15.5, design: .serif))
-                .lineSpacing(4.5)
-                .foregroundStyle(ReadingPalette.ink(scheme))
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message.text)
+                    .font(.system(size: 15.5, design: .serif))
+                    .lineSpacing(4.5)
+                    .foregroundStyle(ReadingPalette.ink(scheme))
+                    .textSelection(.enabled)
+                if controller.persists, thread.book != nil {
+                    saveToNotesButton(message)
+                }
+            }
         }
+    }
+
+    // MARK: Save to notes (ticket 10)
+
+    private func isSaved(_ message: ThreadMessage) -> Bool {
+        if savedInSession.contains(message.persistentModelID) { return true }
+        // Content match catches notes saved in an earlier presentation.
+        return thread.book?.notes.contains {
+            $0.source == "thread"
+                && $0.text == message.text
+                && $0.anchoredText == thread.selectedText
+        } ?? false
+    }
+
+    /// A whisper under the answer: bookmark + "Save to notes" in tertiary
+    /// ink, turning amber "Saved" once the note exists. The note anchors to
+    /// the thread's stored selection, so it underlines the same passage.
+    @ViewBuilder
+    private func saveToNotesButton(_ message: ThreadMessage) -> some View {
+        let saved = isSaved(message)
+        Button {
+            guard !saved else { return }
+            saveToNotes(message)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: saved ? "bookmark.fill" : "bookmark")
+                    .font(.system(size: 9, weight: .semibold))
+                Text(saved ? "Saved to notes" : "Save to notes")
+                    .font(.system(size: 11, weight: .semibold, design: .serif))
+            }
+            .foregroundStyle(saved
+                ? AnyShapeStyle(ReadingPalette.brand(scheme))
+                : AnyShapeStyle(.tertiary))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(saved)
+        .help(saved ? "Saved to this book's notes" : "Anchor this answer to the passage as a note")
+        .animation(.smooth(duration: 0.2), value: saved)
+    }
+
+    private func saveToNotes(_ message: ThreadMessage) {
+        guard let book = thread.book else { return }
+        let note = Note(
+            anchoredText: thread.selectedText,
+            chapterIndex: thread.chapterIndex,
+            sectionIndex: thread.sectionIndex,
+            wordIndex: thread.wordIndex,
+            wordLength: thread.selectedText
+                .split(whereSeparator: \.isWhitespace).count,
+            source: "thread",
+            text: message.text
+        )
+        modelContext.insert(note)
+        note.book = book
+        savedInSession.insert(message.persistentModelID)
     }
 
     private var thinkingView: some View {
